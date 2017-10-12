@@ -4,6 +4,8 @@ import numpy as np
 from sklearn.externals import joblib
 from sklearn.ensemble import RandomForestClassifier
 
+import urllib,os,zipfile
+
 #####################################################################################################
 #####################################################################################################
 #####################################################################################################
@@ -50,6 +52,8 @@ def load_raw_data(data_loading_table,sep=None,
 
 def check_data(infile):
     pass
+    ### check format: time
+    ### check encoding
 
 
 def detect_extra_new_line_character(infile,sep=None,outfile=None):
@@ -234,53 +238,6 @@ def predict_var_type(var_col):
 #####################################################################################################
 ## summary 
 
-def generate_var_summary(raw_data,table_summary=None,predict_var_type=True):
-    ##############################################
-    ### init the var_summary
-    if table_summary is None:
-        table_summary = generate_table_summary(raw_data)
-    table_names = []
-    var_names   = []
-    var_types   = []
-    n_samples   = []
-    n_levels    = []
-    n_missing   = []
-    predicted_var_type = []
-    for ind, row in table_summary.iterrows():
-        print 'processing ->',row.table_name
-        table_names = table_names + [row.table_name] * row.n_variables
-        var_names = var_names + raw_data[row.table_name].columns.tolist()
-        var_types = var_types + raw_data[row.table_name].dtypes.tolist()
-        n_samples = n_samples + [row.n_samples] * row.n_variables
-        n_levels  = n_levels + raw_data[row.table_name].apply(pd.Series.nunique).values.tolist()
-        n_missing = n_missing + raw_data[row.table_name].isnull().sum().tolist()
-        ## predict var type
-        ## the if statement is necessary when changing the feature extraction function and re-traning the model 
-        if predict_var_type:
-            for var_col in raw_data[row.table_name].columns:
-                predicted_var_type.append(predict_var_type(raw_data[row.table_name][var_col]))
-        else:
-            predicted_var_type.append(np.nan)
-    ####
-    var_summary = pd.DataFrame({
-        'table_name':table_names,
-        'var_name':var_names,
-        'var_type':var_types,
-        'predicted_var_type':predicted_var_type,
-        'n_samples':n_samples,
-        'n_levels':n_levels,
-        'n_missing':n_missing
-    })
-    var_summary['missing_percent'] = var_summary['n_missing'] / var_summary['n_samples'] 
-    ################################################
-    ### correct the var type
-    
-    ################################################
-    col_ordered = ['table_name','var_name','var_type','predicted_var_type',
-                   'n_samples','n_levels','n_missing','missing_percent']
-    var_summary = var_summary[col_ordered]
-    return(var_summary)
-
 
 def generate_table_summary(raw_data):
     #table_summary = pd.DataFrame(columns=['table_name','n_samples','n_variables'])
@@ -301,3 +258,224 @@ def generate_table_summary(raw_data):
 
 
 
+def generate_var_summary(raw_data,table_summary=None,infer_var_type=True):
+    ##############################################
+    ### init the var_summary
+    if table_summary is None:
+        table_summary = generate_table_summary(raw_data)
+    table_names = []
+    var_names   = []
+    var_types   = []
+    n_samples   = []
+    n_levels    = []
+    n_missing   = []
+    predicted_var_type = []
+    ###
+    column_list = ['min','max','mean','median','std',
+                  'earliest_date','latest_date',
+                  'largest_category','largest_category_count','largest_category_percent']
+    df = pd.DataFrame(index=np.arange(table_summary.n_variables.sum()),columns=column_list)
+    ###
+    i = -1
+    for ind, row in table_summary.iterrows():
+        print 'processing ->',row.table_name
+        ### use arr.extend(), faster!
+        table_names = table_names + [row.table_name] * row.n_variables
+        var_names = var_names + raw_data[row.table_name].columns.tolist()
+        var_types = var_types + raw_data[row.table_name].dtypes.tolist()
+        n_samples = n_samples + [row.n_samples] * row.n_variables
+        n_levels  = n_levels + raw_data[row.table_name].apply(pd.Series.nunique).values.tolist()
+        n_missing = n_missing + raw_data[row.table_name].isnull().sum().tolist()
+        
+        ## predict var type
+        ## the if statement is necessary when changing the feature extraction function and re-traning the model
+        if infer_var_type:
+            for var_ind, var_col in enumerate(raw_data[row.table_name].columns):
+                i = i + 1
+                vtype = predict_var_type(raw_data[row.table_name][var_col])
+                predicted_var_type.append(vtype)
+                if vtype == 'numeric':
+                    df.loc[i,'min'] = raw_data[row.table_name][var_col].min()
+                    df.loc[i,'max'] = raw_data[row.table_name][var_col].max()
+                    df.loc[i,'mean'] = raw_data[row.table_name][var_col].mean()
+                    df.loc[i,'std'] = raw_data[row.table_name][var_col].std()
+                    df.loc[i,'median'] = raw_data[row.table_name][var_col].median()
+                if vtype == 'date':
+                    #print row.table_name, var_col
+                    df_time = (pd.to_datetime(raw_data[row.table_name][var_col],infer_datetime_format=True))
+                    df.loc[i,'earliest_date'] = df_time.min()
+                    df.loc[i,'latest_date'] = df_time.max()
+                    del df_time
+                if vtype == 'categorical' or vtype == 'text':
+                    freq = raw_data[row.table_name][var_col].value_counts()
+                    df.loc[i,'largest_category'] = freq.idxmax()
+                    df.loc[i,'largest_category_count'] = freq[df.loc[i,'largest_category']]
+                    del freq
+              
+        else:
+            predicted_var_type = predicted_var_type + [np.nan]*row.n_variables
+            
+        #from IPython.core.debugger import Tracer; Tracer()() 
+    ####
+    var_summary = pd.DataFrame({
+        'table_name':table_names,
+        'var_name':var_names,
+        'var_type':var_types,
+        'predicted_var_type':predicted_var_type,
+        'n_samples':n_samples,
+        'n_levels':n_levels,
+        'n_missing':n_missing
+    })
+    if infer_var_type:
+        var_summary = pd.concat([var_summary,df], axis=1)
+    var_summary['missing_percent'] = var_summary['n_missing'] / var_summary['n_samples'] 
+    var_summary['largest_category_percent'] = var_summary['largest_category_count'] / var_summary['n_samples'] 
+    ################################################
+    ### correct the var type
+    
+    ################################################
+    col_ordered = ['table_name','var_name','var_type','predicted_var_type',
+                   'n_samples','n_levels','n_missing','missing_percent'] + column_list
+    var_summary = var_summary[col_ordered]
+    return(var_summary)
+
+
+def find_common_variables(raw_data):
+    all_vars = raw_data.keys()
+    n = len(all_vars)
+    common_vars = pd.DataFrame(index=np.arange(n*(n-1)/2),columns=['table1','table2','common_vars'])
+    ind = -1
+    for i in range(n):
+        for j in range(i+1,n):
+            #if i==j:continue
+            #print i,j
+            ind = ind + 1
+            table1 = all_vars[i]
+            table2 = all_vars[j]
+            common_vars.loc[ind,'table1'] = table1
+            common_vars.loc[ind,'table2'] = table2
+            common_vars.loc[ind,'common_vars'] = (' | ').join(list(set(raw_data[table1].columns).intersection(set(raw_data[table2].columns))))
+    return(common_vars)
+  
+    
+    
+def generate_var_disbution(raw_data,outfile, table_summary=None,infer_var_type=True):
+    writer = pd.ExcelWriter(outfile)
+    #df1.to_excel(writer,'Sheet1')
+    #df2.to_excel(writer,'Sheet2')
+    ##############################################
+    ### init the var_summary
+    if table_summary is None:
+        table_summary = generate_table_summary(raw_data)
+    ##############################################
+    predicted_var_type = []
+    i = 0
+    for ind, row in table_summary.iterrows():
+        if infer_var_type:
+            for var_ind, var_col in enumerate(raw_data[row.table_name].columns):
+                i = i + 1
+                print i,row.table_name,var_col
+                vtype = predict_var_type(raw_data[row.table_name][var_col])
+                predicted_var_type.append(vtype)
+                if vtype == 'categorical':
+                    var_dist = pd.DataFrame(raw_data[row.table_name][var_col].value_counts(dropna=False)).reset_index()
+                    var_dist.columns = [row.table_name+'__'+var_col,'Freq']
+                    var_dist['Percent'] = var_dist['Freq'] /  var_dist['Freq'].sum()
+                    pd.DataFrame(var_dist).to_excel(writer,(row.table_name+'__'+var_col)[0:30])
+                    #break
+                if vtype == 'date':
+                    pass
+    writer.save()
+    return(None)    
+    
+
+    
+def get_ICD_table():
+    
+    
+    #import urllib2
+    #import requests
+    ### ICD10
+    ### https://www.cms.gov/Medicare/Coding/ICD10/2018-ICD-10-CM-and-GEMs.html
+    ### https://www.cms.gov/Medicare/Coding/ICD10/Downloads/2018-ICD-10-Code-Descriptions.zip
+    ### https://www.cms.gov/Medicare/Coding/ICD10/Downloads/2018-ICD-10-PCS-Order-File.zip
+    ### ICD9
+    ### https://www.cms.gov/Medicare/Coding/ICD9ProviderDiagnosticCodes/codes.html
+    ### https://www.cms.gov/Medicare/Coding/ICD9ProviderDiagnosticCodes/Downloads/ICD-9-CM-v32-master-descriptions.zip
+    
+    if not os.path.exists('./download_icd_code_table/'):
+        os.makedirs('./download_icd_code_table/')
+    
+    url = 'https://www.cms.gov/Medicare/Coding/ICD10/Downloads/2018-ICD-10-Code-Descriptions.zip'
+    download_file = urllib.urlretrieve(url, "./download_icd_code_table/icd10_code.zip")[0]
+    
+    zip_ref = zipfile.ZipFile(download_file,'r')
+    zip_ref.extractall('./download_icd_code_table/')
+    zip_ref.close()
+    
+    url = 'https://www.cms.gov/Medicare/Coding/ICD10/Downloads/2018-ICD-10-PCS-Order-File.zip'
+    download_file = urllib.urlretrieve(url, "./download_icd_code_table/icd10_code.zip")[0]
+    
+    zip_ref = zipfile.ZipFile(download_file,'r')
+    zip_ref.extractall('./download_icd_code_table/')
+    zip_ref.close()
+    
+        
+    url = 'https://www.cms.gov/Medicare/Coding/ICD9ProviderDiagnosticCodes/Downloads/ICD-9-CM-v32-master-descriptions.zip'
+    download_file = urllib.urlretrieve(url, "./download_icd_code_table/icd10_code.zip")[0]
+    
+    zip_ref = zipfile.ZipFile(download_file,'r')
+    zip_ref.extractall('./download_icd_code_table/')
+    zip_ref.close()
+    
+    #ICD-10-CM (diagnosis) and ICD-10-PCS (procedure)
+    #icd10cm_order_2018.txt
+    #icd10pcs_order_2018.txt
+    
+    #ICD-9-CM Diagnosis and Procedure Codes
+    #CMS32_DESC_LONG_SHORT_DX.xlsx
+    #CMS32_DESC_LONG_SHORT_SG.xlsx
+    
+    icd10_diagnosis = pd.read_fwf('./download_icd_code_table/icd10cm_order_2018.txt',header=None,names=['index','ICD_code','flag','short_name','long_name'])
+    icd10_diagnosis['type'] = 'ICD10_diagnosis'
+    icd10_diagnosis = icd10_diagnosis[['ICD_code','short_name','long_name']]
+    icd10_procedure = pd.read_fwf('./download_icd_code_table/icd10pcs_order_2018.txt',header=None,names=['index','ICD_code','flag','short_name','long_name'])
+    icd10_procedure['type'] = 'ICD10_procedure'
+    icd10_procedure = icd10_procedure[['ICD_code','short_name','long_name']]
+    
+    icd9_diagnosis = pd.read_excel('./download_icd_code_table/CMS32_DESC_LONG_SHORT_DX.xlsx',headr=0,names=['ICD_code','short_name','long_name'])
+    icd9_diagnosis['type'] = 'ICD9_diagnosis'
+    icd9_procedure = pd.read_fwf('./download_icd_code_table/CMS32_DESC_LONG_SHORT_SG.xlsx',headr=0,names=['ICD_code','short_name','long_name'])
+    icd9_procedure['type'] = 'ICD9_procedure'
+    
+    icd_table = pd.concat([icd10_diagnosis,icd10_procedure,icd9_diagnosis,icd9_procedure],axis=0,ignore_index=True)
+    
+    return(icd_table)
+#####################################################################################################
+#####################################################################################################
+#####################################################################################################
+#####################################################################################################
+## Feature engineering
+
+def generate_dummy_vars_for_train_and_test(train, test, cat_vars):
+    ###############
+    categories={} 
+    for f in cat_vars:
+        train[f] = train[f].astype('category')
+        categories[f] = train[f].cat.categories
+    train_dummy = pd.get_dummies(train,columns=cat_vars)
+    ###############
+    for f in cat_vars:
+        test[f] = test[f].astype('category')    
+        test[f].cat.set_categories(categories[f],inplace=True)
+    test_dummy = pd.get_dummies(test,columns = cat_vars)
+    ####
+    return(train_dummy,test_dummy)
+
+
+### ICD10
+### https://www.cms.gov/Medicare/Coding/ICD10/2018-ICD-10-CM-and-GEMs.html
+### https://www.cms.gov/Medicare/Coding/ICD10/Downloads/2018-ICD-10-Code-Descriptions.zip
+### ICD9
+### https://www.cms.gov/Medicare/Coding/ICD9ProviderDiagnosticCodes/codes.html
+### https://www.cms.gov/Medicare/Coding/ICD9ProviderDiagnosticCodes/Downloads/ICD-9-CM-v32-master-descriptions.zip
